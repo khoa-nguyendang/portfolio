@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS translations;
+DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS posts;
+DROP TABLE IF EXISTS categories;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS site_configs;
+DROP TABLE IF EXISTS schema_migrations;

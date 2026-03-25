@@ -1,0 +1,217 @@
+name: Build and Push Images
+
+# Manual trigger only — select environment and version.
+# Registry: sgp.vultrcr.com/oidea
+# Environment is encoded in the tag:
+#   dev  → sgp.vultrcr.com/oidea/portfolio-<service>:dev-YYYYMMDD-sha7
+#   stg  → sgp.vultrcr.com/oidea/portfolio-<service>:stg-YYYYMMDD-sha7
+#   prod → sgp.vultrcr.com/oidea/portfolio-<service>:v0.0.1 (requires admin approval)
+#
+# Repo-level secrets: VCR_PUSH_USERNAME, VCR_PUSH_PASSWORD, DOPPLER_API_TOKEN
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v1.2.3). Empty = auto."
+        required: false
+        default: ""
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: dev
+      update_doppler_image_tag:
+        description: "Update Doppler IMAGE_TAG after build?"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # ── Resolve build context ──────────────────────────────────
+  context:
+    name: Resolve build context
+    runs-on: ubuntu-latest
+    outputs:
+      registry:    ${{ steps.ctx.outputs.registry }}
+      tag:         ${{ steps.ctx.outputs.tag }}
+      environment: ${{ steps.ctx.outputs.environment }}
+      is_prod:     ${{ steps.ctx.outputs.is_prod }}
+      doppler_config: ${{ steps.ctx.outputs.doppler_config }}
+    steps:
+      - name: Determine registry, tag, and environment
+        id: ctx
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          SHA7="${GITHUB_SHA::7}"
+          ENV="${{ inputs.environment }}"
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            TAG="${{ inputs.version }}"
+            if ! [[ "$TAG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+              echo "::error::Invalid version '$TAG'. Must match [a-zA-Z0-9._-]+ (e.g. v0.0.1, 1.2.3-rc1)"
+              exit 1
+            fi
+          else
+            TAG="${ENV}-${DATE}-${SHA7}"
+          fi
+
+          REGISTRY="sgp.vultrcr.com/oidea"
+
+          case "$ENV" in
+            dev)  DOPPLER_CONFIG="dev" ;;
+            stg)  DOPPLER_CONFIG="stg" ;;
+            prod) DOPPLER_CONFIG="prd" ;;
+          esac
+
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "is_prod=$( [[ "$ENV" == "prod" ]] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "doppler_config=${DOPPLER_CONFIG}" >> $GITHUB_OUTPUT
+
+  # ── Run tests ──────────────────────────────────────────────
+  test:
+    name: Run tests
+    needs: context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: backend/go.sum
+
+      - name: Backend tests
+        working-directory: backend
+        run: go test ./... -short -count=1
+
+  # ── Production approval gate ───────────────────────────────
+  approve-prod:
+    name: Production approval
+    needs: [context, test]
+    if: needs.context.outputs.is_prod == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo "Production build approved by ${{ github.actor }}"
+
+  # ── Build and push each service ────────────────────────────
+  build:
+    name: Build ${{ matrix.service }}
+    needs: [context, test, approve-prod]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.approve-prod.result == 'success' || needs.approve-prod.result == 'skipped')
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: portfolio-backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+          - service: portfolio-frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+          - service: portfolio-admin
+            context: ./admin
+            dockerfile: ./admin/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Vultr Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: sgp.vultrcr.com
+          username: ${{ secrets.VCR_PUSH_USERNAME }}
+          password: ${{ secrets.VCR_PUSH_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ needs.context.outputs.registry }}/${{ matrix.service }}:${{ needs.context.outputs.tag }}
+          build-args: |
+            BUILD_DATE=${{ github.run_id }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ needs.context.outputs.environment }}
+          cache-to: type=gha,scope=${{ matrix.service }}-${{ needs.context.outputs.environment }},mode=max
+          provenance: false
+
+  # ── Update Doppler IMAGE_TAG ───────────────────────────────
+  update-doppler:
+    name: Update Doppler IMAGE_TAG
+    needs: [context, build]
+    if: inputs.update_doppler_image_tag == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update IMAGE_TAG in Doppler
+        run: |
+          TAG="${{ needs.context.outputs.tag }}"
+          CONFIG="${{ needs.context.outputs.doppler_config }}"
+          PROJECT="portfolio"
+
+          echo "==> Updating IMAGE_TAG=$TAG in Doppler project=$PROJECT config=$CONFIG"
+
+          HTTP_STATUS=$(curl -s -o /tmp/doppler_response.json -w "%{http_code}" \
+            -X POST "https://api.doppler.com/v3/configs/config/secrets" \
+            -H "Authorization: Bearer ${{ secrets.DOPPLER_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"project\": \"$PROJECT\",
+              \"config\": \"$CONFIG\",
+              \"secrets\": {
+                \"IMAGE_TAG\": \"$TAG\"
+              }
+            }")
+
+          if [[ "$HTTP_STATUS" -ge 200 && "$HTTP_STATUS" -lt 300 ]]; then
+            echo "Doppler IMAGE_TAG updated to $TAG (HTTP $HTTP_STATUS)"
+          else
+            echo "ERROR: Doppler API returned HTTP $HTTP_STATUS"
+            cat /tmp/doppler_response.json
+            exit 1
+          fi
+
+  # ── Summary ────────────────────────────────────────────────
+  summary:
+    name: Release summary
+    needs: [context, build, update-doppler]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - run: |
+          DOPPLER_STATUS="${{ needs.update-doppler.result }}"
+          if [[ "$DOPPLER_STATUS" == "skipped" ]]; then
+            DOPPLER_MSG="Skipped (not requested)"
+          elif [[ "$DOPPLER_STATUS" == "success" ]]; then
+            DOPPLER_MSG="Updated to \`${{ needs.context.outputs.tag }}\`"
+          else
+            DOPPLER_MSG="Failed"
+          fi
+
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## Build complete
+
+          | Field | Value |
+          |-------|-------|
+          | Environment | \`${{ needs.context.outputs.environment }}\` |
+          | Registry | \`${{ needs.context.outputs.registry }}\` |
+          | Release tag | \`${{ needs.context.outputs.tag }}\` |
+          | Doppler IMAGE_TAG | $DOPPLER_MSG |
+
+          Deploy: run **Deploy to VM** workflow with:
+          \`\`\`
+          image_tag: ${{ needs.context.outputs.tag }}
+          \`\`\`
+          EOF

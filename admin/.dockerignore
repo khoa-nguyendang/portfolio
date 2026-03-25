@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output (rebuilt in container)
+dist/
+build/
+.output/
+
+# Version control
+.git
+.gitignore
+
+# Documentation
+docs/
+*.md
+LICENSE
+
+# IDE & editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Misc
+*.log
+tmp/

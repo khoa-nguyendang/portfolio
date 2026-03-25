@@ -1,0 +1,146 @@
+# Production docker-compose
+# Run with Doppler: doppler run -- docker compose -f docker-compose.prod.yml up -d
+#
+# All secrets injected via Doppler environment variables.
+# Images pulled from Vultr Container Registry.
+
+services:
+  # ── Data stores ─────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: portfolio-postgres
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-portfolio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portfolio}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - portfolio-network
+
+  # ── Reverse proxy ───────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: portfolio-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+      - frontend
+      - admin
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - portfolio-network
+
+  # ── Application services ────────────────────────────────────
+  backend:
+    image: sgp.vultrcr.com/oidea/portfolio-backend:${IMAGE_TAG}
+    container_name: portfolio-backend
+    restart: unless-stopped
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-portfolio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-portfolio}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
+      SERVER_PORT: "8080"
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL}
+      LLM_API_URL: ${LLM_API_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - portfolio-network
+
+  frontend:
+    image: sgp.vultrcr.com/oidea/portfolio-frontend:${IMAGE_TAG}
+    container_name: portfolio-frontend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      API_BACKEND: http://backend:8080
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - portfolio-network
+
+  admin:
+    image: sgp.vultrcr.com/oidea/portfolio-admin:${IMAGE_TAG}
+    container_name: portfolio-admin
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - portfolio-network
+
+  # ── Cloudflare Tunnel ──────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: portfolio-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - caddy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - portfolio-network
+
+networks:
+  portfolio-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

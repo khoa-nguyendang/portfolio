@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <script>
+      (function(){var t=localStorage.getItem('portfolio-theme')||'system';
+      var d=t==='system'?window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light':t;
+      document.documentElement.className=d;})();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Khoa Nguyen Dang - Senior Solution Architect & Full-Stack Engineer with 11+ years of experience in cloud architecture, microservices, and AI/ML." />
+    <meta name="author" content="Khoa Nguyen Dang" />
+    <meta property="og:title" content="Khoa Nguyen Dang - Portfolio" />
+    <meta property="og:description" content="Senior Solution Architect & Full-Stack Engineer with 11+ years of experience." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Khoa Nguyen Dang - Portfolio</title>
+  </head>
+  <body>
+    <div id="root"><!--ssr-outlet--></div>
+    <script type="module" src="/src/entry-client.tsx"></script>
+  </body>
+</html>

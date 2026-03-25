@@ -1,0 +1,90 @@
+# Development docker-compose
+# Usage: docker compose up --build
+
+services:
+  # ── Data stores ─────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: portfolio-postgres
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio
+      POSTGRES_DB: portfolio
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - portfolio-network
+
+  # ── Application services ────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: portfolio-backend
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://portfolio:portfolio@postgres:5432/portfolio?sslmode=disable
+      SERVER_PORT: "8080"
+    networks:
+      - portfolio-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: portfolio-frontend
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+    environment:
+      API_BACKEND: http://backend:8080
+    networks:
+      - portfolio-network
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    container_name: portfolio-admin
+    expose:
+      - "80"
+    depends_on:
+      - backend
+    networks:
+      - portfolio-network
+
+  # ── Cloudflare Tunnel ──────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: portfolio-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - backend
+      - frontend
+      - admin
+    networks:
+      - portfolio-network
+
+networks:
+  portfolio-network:
+    driver: bridge
+
+volumes:
+  postgres-data:

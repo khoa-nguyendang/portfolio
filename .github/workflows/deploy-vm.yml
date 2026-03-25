@@ -1,0 +1,165 @@
+name: Deploy to VM
+
+# Deploys via direct SSH to public server → Doppler + docker compose.
+#
+# Flow:
+#   1. SSH to target server (public IP from variable)
+#   2. Docker login to Vultr CR
+#   3. doppler run -- docker compose pull && up -d
+#
+# Required secrets:
+#   VCR_PUSH_USERNAME   - Vultr Container Registry username
+#   VCR_PUSH_PASSWORD   - Vultr Container Registry password
+#   DEPLOY_SSH_KEY      - SSH private key for server access
+#   DOPPLER_TOKEN_PROD  - Doppler service token (project=portfolio, config=prd)
+#
+# Required variables:
+#   DEPLOY_SERVER       - Server public IP or hostname (e.g. 116.203.31.138)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. dev-20260325-abc1234 or v1.0.0). Empty = use Doppler IMAGE_TAG."
+        required: false
+        type: string
+        default: ""
+      services:
+        description: "Services to update (comma-separated or 'all')"
+        required: false
+        type: string
+        default: all
+      sync_config_files:
+        description: "Upload latest docker-compose.prod.yml + Caddyfile to server?"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    name: Deploy → ${{ vars.DEPLOY_SERVER }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-portfolio
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 1. Setup SSH ─────────────────────────────────────────────
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.DEPLOY_SERVER }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      # ── 2. Upload config files ───────────────────────────────────
+      - name: Sync config files to server
+        if: inputs.sync_config_files == true
+        run: |
+          DEPLOY_PATH="/opt/portfolio"
+          HOST="root@${{ vars.DEPLOY_SERVER }}"
+
+          ssh "$HOST" "mkdir -p $DEPLOY_PATH"
+          scp docker-compose.prod.yml   "$HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+          scp Caddyfile                  "$HOST:$DEPLOY_PATH/Caddyfile"
+          echo "==> Synced docker-compose.prod.yml + Caddyfile to ${{ vars.DEPLOY_SERVER }}:$DEPLOY_PATH"
+
+      # ── 3. Deploy with Doppler ───────────────────────────────────
+      - name: Deploy services
+        run: |
+          DEPLOY_PATH="/opt/portfolio"
+          HOST="root@${{ vars.DEPLOY_SERVER }}"
+          SERVICES="${{ inputs.services }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
+
+          # Login to Vultr Container Registry
+          ssh "$HOST" "docker login sgp.vultrcr.com \
+            -u '${{ secrets.VCR_PUSH_USERNAME }}' \
+            -p '${{ secrets.VCR_PUSH_PASSWORD }}'"
+
+          ssh "$HOST" bash -s "$DEPLOY_PATH" "${{ secrets.DOPPLER_TOKEN_PROD }}" \
+            "$IMAGE_TAG" "$SERVICES" << 'REMOTE'
+          set -euo pipefail
+          DEPLOY_PATH="$1"
+          DOPPLER_TOKEN="$2"
+          IMAGE_TAG="$3"
+          SERVICES="$4"
+
+          cd "$DEPLOY_PATH"
+
+          # Install Doppler if not present
+          if ! command -v doppler &>/dev/null; then
+            echo "==> Installing Doppler CLI..."
+            curl -sLf --retry 3 --tlsv1.2 --proto "=https" \
+              "https://cli.doppler.com/install.sh" | sh
+          fi
+
+          export DOPPLER_TOKEN="$DOPPLER_TOKEN"
+
+          # If IMAGE_TAG provided, override; otherwise Doppler has it
+          if [[ -n "$IMAGE_TAG" ]]; then
+            export IMAGE_TAG="$IMAGE_TAG"
+            echo "==> Using IMAGE_TAG=$IMAGE_TAG (from workflow input)"
+          else
+            echo "==> Using IMAGE_TAG from Doppler"
+          fi
+
+          echo "==> Pulling images..."
+          if [[ "$SERVICES" == "all" ]]; then
+            doppler run --project portfolio --config prd -- \
+              docker compose -f docker-compose.prod.yml pull
+          else
+            IFS=',' read -ra SVC_LIST <<< "$SERVICES"
+            doppler run --project portfolio --config prd -- \
+              docker compose -f docker-compose.prod.yml pull "${SVC_LIST[@]}"
+          fi
+
+          echo "==> Starting services..."
+          if [[ "$SERVICES" == "all" ]]; then
+            doppler run --project portfolio --config prd -- \
+              docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          else
+            IFS=',' read -ra SVC_LIST <<< "$SERVICES"
+            doppler run --project portfolio --config prd -- \
+              docker compose -f docker-compose.prod.yml up -d --no-deps "${SVC_LIST[@]}"
+          fi
+
+          echo "==> Cleaning up dangling images..."
+          docker image prune -f
+
+          echo "==> Done"
+          REMOTE
+
+      # ── 4. Health check ──────────────────────────────────────────
+      - name: Health check
+        run: |
+          echo "==> Waiting 15s for services to stabilise..."
+          sleep 15
+
+          HOST="root@${{ vars.DEPLOY_SERVER }}"
+
+          ssh "$HOST" "cd /opt/portfolio && docker compose -f docker-compose.prod.yml ps"
+
+          ssh "$HOST" "curl -sf http://127.0.0.1:8080/health" && \
+            echo "Backend healthy" || echo "WARNING: Backend health check failed"
+
+  # ── Summary ──────────────────────────────────────────────────
+  summary:
+    name: Deploy summary
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## Deploy — ${{ needs.deploy.result }}
+
+          | Field | Value |
+          |-------|-------|
+          | Server | \`${{ vars.DEPLOY_SERVER }}\` |
+          | Image tag | \`${{ inputs.image_tag || '(from Doppler)' }}\` |
+          | Services | \`${{ inputs.services }}\` |
+          | Triggered by | @${{ github.actor }} |
+          EOF
