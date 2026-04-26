@@ -83,7 +83,7 @@ export default function ContactPage() {
                         <Github className="w-5 h-5 text-text-muted group-hover:text-primary transition-colors" />
                       </a>
                       <a
-                        href="https://linkedin.com/in/khoa-nguyendang"
+                        href="https://www.linkedin.com/in/khoanguyendang1991/"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-10 h-10 rounded-lg bg-surface-hover hover:bg-primary/10 flex items-center justify-center transition-colors group"
